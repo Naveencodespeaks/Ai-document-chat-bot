@@ -1,40 +1,69 @@
 # backend/chain.py
 import os
+import json
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langchain_classic.chains import ConversationalRetrievalChain
-from langchain_classic.memory import ConversationBufferMemory
+from supabase import create_client
+from backend.ingest import search_documents
 
 load_dotenv()
 
-def build_chain(vectorstore):
+supabase = create_client(
+    os.getenv("SUPABASE_URL"),
+    os.getenv("SUPABASE_KEY")
+)
+
+
+def build_llm():
     llm = ChatGroq(
         api_key=os.getenv("GROQ_API_KEY"),
         model_name="llama-3.1-8b-instant",
         temperature=0.2
     )
-
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True,
-        output_key="answer"
-    )
-
-    chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=vectorstore.as_retriever(
-            search_kwargs={"k": 3}
-        ),
-        memory=memory,
-        return_source_documents=True,
-        output_key="answer"
-    )
-
-    return chain, llm
+    return llm
 
 
-def ask_question(chain, llm, question: str) -> dict:
-    # Step 1 — Ask LLM if this is small talk or a document question
+def save_message(session_id: str, role: str, message: str, user_id: int = None):
+    supabase.table("chat_history").insert({
+        "session_id": session_id,
+        "role": role,
+        "message": message,
+        "user_id": user_id
+    }).execute()
+
+
+def get_chat_history(session_id: str):
+    result = supabase.table("chat_history") \
+        .select("role, message") \
+        .eq("session_id", session_id) \
+        .order("created_at") \
+        .execute()
+    return result.data
+
+
+def save_user(session_id: str, name: str, email: str) -> int:
+    existing = supabase.table("users") \
+        .select("id") \
+        .eq("session_id", session_id) \
+        .execute()
+
+    if existing.data:
+        supabase.table("users") \
+            .update({"last_seen": "now()"}) \
+            .eq("session_id", session_id) \
+            .execute()
+        return existing.data[0]["id"]
+
+    result = supabase.table("users").insert({
+        "session_id": session_id,
+        "name": name,
+        "email": email
+    }).execute()
+    return result.data[0]["id"]
+
+
+def ask_question(llm, question: str, session_id: str, user_id: int) -> dict:
+    # Step 1 — classify message
     classifier_prompt = f"""You are a classifier. Decide if the user message is:
 A) Small talk / greeting / general conversation (NOT about any document)
 B) A question that needs to be answered from a document
@@ -44,24 +73,63 @@ User message: "{question}"
 Reply with only one letter: A or B"""
 
     classification = llm.invoke(classifier_prompt).content.strip().upper()
+    print(f"DEBUG classification: {classification}")
 
-    # Step 2 — If small talk, reply naturally without searching PDF
+    # Step 2 — small talk
     if classification == "A":
-        chat_prompt = f"""You are a friendly AI assistant. 
+        chat_prompt = f"""You are a friendly AI assistant.
 Reply naturally and helpfully to this message in 1-2 sentences.
 User: {question}"""
         reply = llm.invoke(chat_prompt).content.strip()
-        return {
-            "answer": reply,
-            "sources": []
-        }
+        save_message(session_id, "user", question, user_id)
+        save_message(session_id, "assistant", reply, user_id)
+        return {"answer": reply, "sources": []}
 
-    # Step 3 — If document question, search the PDF
-    response = chain.invoke({"question": question})
-    return {
-        "answer": response["answer"],
-        "sources": [
-            doc.metadata.get("page", "unknown")
-            for doc in response["source_documents"]
-        ]
-    }
+    # Step 3 — document question
+    docs = search_documents(question, top_k=3)
+    print(f"DEBUG docs: {docs}")
+
+    if not docs:
+        reply = "I couldn't find relevant information in the document. Please try rephrasing your question."
+        save_message(session_id, "user", question, user_id)
+        save_message(session_id, "assistant", reply, user_id)
+        return {"answer": reply, "sources": []}
+
+    # Build context
+    context = "\n\n".join([doc["content"] for doc in docs])
+
+    # Fix metadata parsing — handle both dict and string
+    sources = []
+    for doc in docs:
+        meta = doc["metadata"]
+        if isinstance(meta, str):
+            meta = json.loads(meta)
+        sources.append(meta.get("page", "unknown"))
+
+    # Get chat history
+    history = get_chat_history(session_id)
+    history_text = "\n".join([
+        f"{h['role'].capitalize()}: {h['message']}"
+        for h in history[-6:]
+    ])
+
+    # Build prompt
+    prompt = f"""You are a helpful AI customer support assistant.
+Use the following document context to answer the user's question.
+If the answer is not in the context, say you don't know.
+
+Chat History:
+{history_text}
+
+Document Context:
+{context}
+
+User Question: {question}
+
+Answer:"""
+
+    reply = llm.invoke(prompt).content.strip()
+    save_message(session_id, "user", question, user_id)
+    save_message(session_id, "assistant", reply, user_id)
+
+    return {"answer": reply, "sources": sources}

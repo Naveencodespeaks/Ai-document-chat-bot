@@ -1,12 +1,23 @@
 # backend/ingest.py
 import os
+import json
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+from supabase import create_client
 
 load_dotenv()
+
+supabase = create_client(
+    os.getenv("SUPABASE_URL"),
+    os.getenv("SUPABASE_KEY")
+)
+
+embeddings_model = HuggingFaceEmbeddings(
+    model_name="all-MiniLM-L6-v2"
+)
+
 
 def load_and_embed_pdf(pdf_path: str):
     # 1. Load PDF
@@ -22,26 +33,34 @@ def load_and_embed_pdf(pdf_path: str):
     chunks = splitter.split_documents(documents)
     print(f"Split into {len(chunks)} chunks")
 
-    # 3. Create embeddings (runs locally, no API needed)
-    embeddings = HuggingFaceEmbeddings(
-        model_name="all-MiniLM-L6-v2"
-    )
+    # 3. Clear old documents
+    supabase.table("documents").delete().neq("id", 0).execute()
+    print("Cleared old documents ✓")
 
-    # 4. Store in FAISS vector store
-    vectorstore = FAISS.from_documents(chunks, embeddings)
-    vectorstore.save_local("vectorstore")
-    print("Vectorstore saved ✓")
+    # 4. Embed and store
+    print("Embedding and storing in Supabase...")
+    for i, chunk in enumerate(chunks):
+        embedding = [float(x) for x in embeddings_model.embed_query(chunk.page_content)]
+        supabase.table("documents").insert({
+            "content": chunk.page_content,
+            "metadata": chunk.metadata,
+            "embedding": embedding
+        }).execute()
+        if i % 10 == 0:
+            print(f"  Stored {i+1}/{len(chunks)} chunks...")
 
-    return vectorstore
+    print(f"✓ Stored {len(chunks)} chunks in Supabase")
+    return True
 
 
-def load_existing_vectorstore():
-    embeddings = HuggingFaceEmbeddings(
-        model_name="all-MiniLM-L6-v2"
-    )
-    vectorstore = FAISS.load_local(
-        "vectorstore",
-        embeddings,
-        allow_dangerous_deserialization=True
-    )
-    return vectorstore
+def search_documents(query: str, top_k: int = 3):
+    # Convert to explicit float list
+    query_embedding = [float(x) for x in embeddings_model.embed_query(query)]
+
+    result = supabase.rpc("match_documents", {
+        "query_embedding": query_embedding,
+        "match_count": top_k
+    }).execute()
+
+    print(f"DEBUG search: {len(result.data)} results found")
+    return result.data
