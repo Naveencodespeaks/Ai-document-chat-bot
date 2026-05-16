@@ -36,8 +36,8 @@ if not st.session_state.user_registered:
     st.divider()
 
     with st.form("user_form"):
-        name = st.text_input("👤 Your Name", placeholder="Sai Naveen")
-        email = st.text_input("📧 Your Email", placeholder="sai@example.com")
+        name = st.text_input("👤 Your Name", placeholder="Enter your Name")
+        email = st.text_input("📧 Your Email", placeholder="Enter your mail")
         submitted = st.form_submit_button("Start Chatting →", use_container_width=True)
 
         if submitted:
