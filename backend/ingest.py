@@ -15,7 +15,7 @@ supabase = create_client(
 )
 
 embeddings_model = HuggingFaceEmbeddings(
-    model_name="all-MiniLM-L6-v2"
+    model_name="BAAI/bge-small-en-v1.5"
 )
 
 
