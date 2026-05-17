@@ -1,6 +1,7 @@
 # backend/ingest.py
 import os
 import json
+import streamlit as st
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -14,18 +15,20 @@ supabase = create_client(
     os.getenv("SUPABASE_KEY")
 )
 
-embeddings_model = HuggingFaceEmbeddings(
-    model_name="BAAI/bge-small-en-v1.5"
-)
+@st.cache_resource
+def get_embeddings_model():
+    return HuggingFaceEmbeddings(
+        model_name="BAAI/bge-small-en-v1.5"
+    )
+
+embeddings_model = get_embeddings_model()
 
 
 def load_and_embed_pdf(pdf_path: str):
-    # 1. Load PDF
     loader = PyMuPDFLoader(pdf_path)
     documents = loader.load()
     print(f"Loaded {len(documents)} pages")
 
-    # 2. Split into chunks
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=500,
         chunk_overlap=50
@@ -33,11 +36,9 @@ def load_and_embed_pdf(pdf_path: str):
     chunks = splitter.split_documents(documents)
     print(f"Split into {len(chunks)} chunks")
 
-    # 3. Clear old documents
     supabase.table("documents").delete().neq("id", 0).execute()
     print("Cleared old documents ✓")
 
-    # 4. Embed and store
     print("Embedding and storing in Supabase...")
     for i, chunk in enumerate(chunks):
         embedding = [float(x) for x in embeddings_model.embed_query(chunk.page_content)]
@@ -54,7 +55,6 @@ def load_and_embed_pdf(pdf_path: str):
 
 
 def search_documents(query: str, top_k: int = 3):
-    # Convert to explicit float list
     query_embedding = [float(x) for x in embeddings_model.embed_query(query)]
 
     result = supabase.rpc("match_documents", {

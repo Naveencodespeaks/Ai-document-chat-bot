@@ -1,6 +1,7 @@
 # backend/chain.py
 import os
 import json
+import time
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from supabase import create_client
@@ -21,6 +22,18 @@ def build_llm():
         temperature=0.2
     )
     return llm
+
+
+def invoke_with_retry(llm, prompt, retries=3):
+    for attempt in range(retries):
+        try:
+            return llm.invoke(prompt).content.strip()
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(2)
+                continue
+    return None
 
 
 def save_message(session_id: str, role: str, message: str, user_id: int = None):
@@ -72,15 +85,24 @@ User message: "{question}"
 
 Reply with only one letter: A or B"""
 
-    classification = llm.invoke(classifier_prompt).content.strip().upper()
+    classification = invoke_with_retry(llm, classifier_prompt)
     print(f"DEBUG classification: {classification}")
+
+    if not classification:
+        return {"answer": "Connection error. Please try again in a moment.", "sources": []}
+
+    classification = classification.upper()
 
     # Step 2 — small talk
     if classification == "A":
         chat_prompt = f"""You are a friendly AI assistant.
 Reply naturally and helpfully to this message in 1-2 sentences.
 User: {question}"""
-        reply = llm.invoke(chat_prompt).content.strip()
+
+        reply = invoke_with_retry(llm, chat_prompt)
+        if not reply:
+            reply = "Connection error. Please try again."
+
         save_message(session_id, "user", question, user_id)
         save_message(session_id, "assistant", reply, user_id)
         return {"answer": reply, "sources": []}
@@ -128,7 +150,10 @@ User Question: {question}
 
 Answer:"""
 
-    reply = llm.invoke(prompt).content.strip()
+    reply = invoke_with_retry(llm, prompt)
+    if not reply:
+        reply = "Connection error. Please try again."
+
     save_message(session_id, "user", question, user_id)
     save_message(session_id, "assistant", reply, user_id)
 
